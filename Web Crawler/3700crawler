@@ -1,0 +1,137 @@
+#!/usr/bin/env python3
+
+import argparse
+import logging
+import socket
+import ssl
+import time
+
+DEFAULT_SERVER = "proj5.3700.network"
+DEFAULT_PORT = 443
+
+class Crawler:
+    def __init__(self, args):
+        self.server = args.server
+        self.port = args.port
+        self.username = args.username
+        self.password = args.password
+        self.cookie = ""
+        self.token = ""
+        self.location = ""
+        self.visited = []
+        self.links = []
+        self.flags = []
+
+    # Parses the html for cookie
+    def get_cookies(self, data):
+        if (data.find("Set-Cookie: csrftoken=") > -1):
+            self.cookie = data[(data.find("Set-Cookie: csrftoken=") + 22):(data.find("Set-Cookie: csrftoken=") + 86)]
+    
+    # Parses the html for token
+    def get_token(self, data):
+        if (data.find("csrfmiddlewaretoken\" value=\"") > -1):
+            self.token = data[(data.find("csrfmiddlewaretoken\" value=\"") + 28):(data.find("csrfmiddlewaretoken\" value=\"") + 92)]
+
+    # Parses the html for sessionid
+    def get_session(self, data):
+        if (data.find("Set-Cookie: sessionid=") > -1):
+            cookieString = data[data.find("Set-Cookie: sessionid="):]
+            self.cookie = cookieString[(cookieString.find("Set-Cookie: sessiondid=") + 23):cookieString.find("; expires=")]
+
+    # Parses the html for redirect url path
+    def get_location(self , data):
+        locationString = data
+        if (locationString.find("Location: ") > -1):
+            locationString = locationString[(locationString.find("Location: ") + 10):]
+            self.location = locationString[:locationString.find("\r\n")]
+
+    # Parases the html for valid links      
+    def get_links(self, data):
+        while (True):
+            if (data.find("<a href=\"")> -1):
+                data = data[(data.find("<a href=\"") + 9):]
+                link = data[:data.find("\">")]
+                if (self.check_link(link)):
+                    self.links.append(link)
+            else:
+                break
+
+    # Check if a link was already visited
+    def check_link(self, link):
+        if (link in self.visited) or (link in self.links) or (not link.startswith("/fakebook")):
+            return False
+        else:
+            return True
+
+    # handles the login process to get the page
+    def handle_login(self, socket):
+        loginMsg = "username=" + self.username + "&password=" + self.password + "&csrfmiddlewaretoken=" + self.token + "&next=\r\n\r\n"
+        request = "POST /accounts/login/ HTTP/1.1\r\nHost: proj5.3700.network\r\nConnection: keep-alive\r\nContent-Length: " + str(len(loginMsg)) +  "\r\nContent-Type: application/x-www-form-urlencoded\r\nCookie: csrftoken=" + self.cookie + "\r\n\r\n" + loginMsg
+        socket.send(request.encode('ascii'))
+        data = socket.recv(63555).decode('ascii')
+        self.get_cookies(data)
+        self.get_session(data)
+        self.get_location(data)
+
+    # handles the redirect process to get the necessary fields
+    def handle_redirect(self, socket):
+        request = "GET " + self.location + " HTTP/1.1\r\nHost: proj5.3700.network\r\nConnection: keep-alive\r\nCookie: csrftoken=" + self.token + "; sessionid=" +  self.cookie+ "\r\n\r\n"
+        socket.send(request.encode('ascii'))
+        data = socket.recv(63555).decode('ascii')
+        self.get_links(data)
+        self.visited.append(self.location)
+
+    # Parses the current page and finds links to traverse and checks each page for flag.
+    def begin_crawl(self, socket):
+        while(len(self.flags) < 5):
+            try: 
+                request = "GET " + self.links[0] + " HTTP/1.1\r\nHost: proj5.3700.network\r\nConnection: keep-alive\r\nCookie: csrftoken=" + self.token + "; sessionid=" +  self.cookie + "\r\n\r\n"
+                socket.send(request.encode('ascii'))
+            except:
+                logging.warning("seems like there is no link in the link list")
+            data = ""
+            # makes sure that the entire page is received
+            while (data.find("/html") == -1):
+                data = data + socket.recv(63555).decode("ascii")
+            if (data.find("secret") > -1):
+                # if secret string is found it records the flag.
+                flagString = data
+                flagString = flagString[(flagString.find("<h2 class=\'secret_flag\' style=\"color:red\">FLAG: ") + 48):]
+                self.flags.append(flagString[:flagString.find("</h2>")])
+            self.get_links(data)
+            self.get_session(data)
+            self.visited.append(self.links[0])
+            self.links.pop(0)
+        socket.close()
+        
+
+    def run(self):
+        request = "GET /accounts/login/?next=/fakebook/ HTTP/1.1\r\nHost: proj5.3700.network\r\nConnection: keep-alive\r\n\r\n"
+
+        #print("Request to %s:%d" % (self.server, self.port))
+        mysocket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        mysocket.connect((self.server, self.port))
+        context = ssl.create_default_context()
+        ssl_sock = context.wrap_socket(mysocket, server_hostname=self.server)
+        ssl_sock.send(request.encode('ascii'))
+        data = ssl_sock.recv(63555).decode('ascii')
+        # print("Response:\n%s" % data)
+        self.get_cookies(data)
+        self.get_token(data)
+        self.handle_login(ssl_sock)
+        self.handle_redirect(ssl_sock)
+        if self.links:
+            self.begin_crawl(ssl_sock)
+        # prints the flag
+        for each in self.flags:
+             print(each)
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description='crawl Fakebook')
+    parser.add_argument('-s', dest="server", type=str, default=DEFAULT_SERVER, help="The server to crawl")
+    parser.add_argument('-p', dest="port", type=int, default=DEFAULT_PORT, help="The port to use")
+    parser.add_argument('username', type=str, help="The username to use")
+    parser.add_argument('password', type=str, help="The password to use")
+    args = parser.parse_args()
+    sender = Crawler(args)
+    sender.run()
